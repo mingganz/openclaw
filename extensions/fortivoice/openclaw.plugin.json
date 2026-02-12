@@ -1,0 +1,9 @@
+{
+  "id": "fortivoice",
+  "channels": ["fortivoice"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

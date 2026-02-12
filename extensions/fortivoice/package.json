@@ -1,0 +1,33 @@
+{
+  "name": "@openclaw/fortivoice",
+  "version": "2026.2.6-3",
+  "description": "OpenClaw FortiVoice channel plugin",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "fortivoice",
+      "label": "FortiVoice",
+      "selectionLabel": "FortiVoice (WebSocket)",
+      "docsPath": "/channels/fortivoice",
+      "docsLabel": "fortivoice",
+      "blurb": "WebSocket control protocol bridge for call flows.",
+      "order": 75,
+      "quickstartAllowFrom": true
+    },
+    "install": {
+      "npmSpec": "@openclaw/fortivoice",
+      "localPath": "extensions/fortivoice",
+      "defaultChoice": "npm"
+    }
+  }
+}
