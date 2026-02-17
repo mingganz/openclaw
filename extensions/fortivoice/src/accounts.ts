@@ -3,6 +3,7 @@ import type { FortivoiceAccountConfig, FortivoiceConfig } from "./config-schema.
 import type { CoreConfig, ResolvedFortivoiceAccount } from "./types.js";
 
 const DEFAULT_RECONNECT_DELAY_MS = 2_000;
+const E164_PHONE_PATTERN = /^\+?[0-9]{7,15}$/;
 
 function getFortivoiceConfig(cfg: CoreConfig): FortivoiceConfig | undefined {
   return cfg.channels?.fortivoice;
@@ -25,10 +26,11 @@ function hasTopLevelConfig(cfg: CoreConfig): boolean {
   }
   return Boolean(
     base.url ||
-      base.name ||
-      base.enabled !== undefined ||
-      base.reconnectDelayMs !== undefined ||
-      base.helloWorldOnStart !== undefined,
+    base.phone ||
+    base.name ||
+    base.enabled !== undefined ||
+    base.reconnectDelayMs !== undefined ||
+    base.helloWorldOnStart !== undefined,
   );
 }
 
@@ -56,6 +58,14 @@ function mergeAccountConfig(cfg: CoreConfig, accountId: string): FortivoiceAccou
 function normalizeUrl(raw?: string): string | undefined {
   const trimmed = raw?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function normalizePhone(raw?: string): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return E164_PHONE_PATTERN.test(trimmed) ? trimmed : undefined;
 }
 
 export function listFortivoiceAccountIds(cfg: CoreConfig): string[] {
@@ -92,13 +102,17 @@ export function resolveFortivoiceAccount(params: {
 
   const envUrl =
     accountId === DEFAULT_ACCOUNT_ID ? normalizeUrl(process.env.FORTIVOICE_WS_URL) : undefined;
+  const envPhone =
+    accountId === DEFAULT_ACCOUNT_ID ? normalizePhone(process.env.FORTIVOICE_PHONE) : undefined;
   const url = normalizeUrl(merged.url) ?? envUrl;
+  const phone = normalizePhone(merged.phone) ?? envPhone;
 
   return {
     accountId,
     enabled,
-    configured: Boolean(url),
+    configured: Boolean(url && phone),
     name: merged.name?.trim() || undefined,
+    phone,
     url,
     reconnectDelayMs: merged.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS,
     helloWorldOnStart: merged.helloWorldOnStart !== false,

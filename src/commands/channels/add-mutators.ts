@@ -22,6 +22,7 @@ export function applyChannelAccountConfig(params: {
   channel: ChatChannel;
   accountId: string;
   name?: string;
+  phone?: string;
   token?: string;
   tokenFile?: string;
   botToken?: string;
@@ -61,6 +62,7 @@ export function applyChannelAccountConfig(params: {
   }
   const input: ChannelSetupInput = {
     name: params.name,
+    phone: params.phone,
     token: params.token,
     tokenFile: params.tokenFile,
     botToken: params.botToken,

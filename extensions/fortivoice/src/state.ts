@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { normalizeFortivoiceTarget } from "./protocol.js";
 import type { FortivoiceCallInfo } from "./types.js";
+import { normalizeFortivoiceTarget } from "./protocol.js";
 
 type QueuedMessage = {
   messageId: string;

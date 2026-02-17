@@ -9,6 +9,12 @@ import {
   setAccountEnabledInConfigSection,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
+import type { CoreConfig, ResolvedFortivoiceAccount } from "./types.js";
+import {
+  listFortivoiceAccountIds,
+  resolveDefaultFortivoiceAccountId,
+  resolveFortivoiceAccount,
+} from "./accounts.js";
 import { FortivoiceConfigSchema } from "./config-schema.js";
 import { monitorFortivoiceProvider } from "./monitor.js";
 import { normalizeFortivoiceTarget } from "./protocol.js";
@@ -17,12 +23,6 @@ import {
   queueFortivoiceText,
   resolveFortivoiceSessionId,
 } from "./state.js";
-import type { CoreConfig, ResolvedFortivoiceAccount } from "./types.js";
-import {
-  listFortivoiceAccountIds,
-  resolveDefaultFortivoiceAccountId,
-  resolveFortivoiceAccount,
-} from "./accounts.js";
 
 function isWebSocketUrl(raw: string): boolean {
   try {
@@ -31,6 +31,10 @@ function isWebSocketUrl(raw: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isE164ishPhone(raw: string): boolean {
+  return /^\+?[0-9]{7,15}$/.test(raw);
 }
 
 function resolveSessionTarget(params: {
@@ -64,10 +68,11 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
   configSchema: buildChannelConfigSchema(FortivoiceConfigSchema),
   config: {
     listAccountIds: (cfg) => listFortivoiceAccountIds(cfg as CoreConfig),
-    resolveAccount: (cfg, accountId) => resolveFortivoiceAccount({
-      cfg: cfg as CoreConfig,
-      accountId,
-    }),
+    resolveAccount: (cfg, accountId) =>
+      resolveFortivoiceAccount({
+        cfg: cfg as CoreConfig,
+        accountId,
+      }),
     defaultAccountId: (cfg) => resolveDefaultFortivoiceAccountId(cfg as CoreConfig),
     setAccountEnabled: ({ cfg, accountId, enabled }) =>
       setAccountEnabledInConfigSection({
@@ -82,14 +87,14 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
         cfg: cfg as CoreConfig,
         sectionKey: "fortivoice",
         accountId,
-        clearBaseFields: ["name", "url", "reconnectDelayMs", "helloWorldOnStart"],
+        clearBaseFields: ["name", "phone", "url", "reconnectDelayMs", "helloWorldOnStart"],
       }),
-    isConfigured: (account) => Boolean(account.url),
+    isConfigured: (account) => Boolean(account.url && account.phone),
     describeAccount: (account) => ({
       accountId: account.accountId,
       name: account.name,
       enabled: account.enabled,
-      configured: Boolean(account.url),
+      configured: Boolean(account.url && account.phone),
       url: account.url,
     }),
   },
@@ -113,10 +118,18 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
       if (url && !isWebSocketUrl(url)) {
         return "FortiVoice --url must use ws:// or wss:// and include host[:port].";
       }
+      const phone = input.phone?.trim();
+      if (!phone && !input.useEnv) {
+        return "FortiVoice requires --phone <+15551234567> (or --use-env).";
+      }
+      if (phone && !isE164ishPhone(phone)) {
+        return "FortiVoice --phone must look like E.164 (+14155550123).";
+      }
       return null;
     },
     applyAccountConfig: ({ cfg, accountId, input }) => {
       const url = (input.url ?? input.httpUrl)?.trim();
+      const phone = input.phone?.trim();
       const namedConfig = applyAccountNameToChannelSection({
         cfg,
         channelKey: "fortivoice",
@@ -141,6 +154,7 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
             fortivoice: {
               ...coreNext.channels?.fortivoice,
               enabled: true,
+              ...(phone ? { phone } : {}),
               ...(input.useEnv ? {} : url ? { url } : {}),
             },
           },
@@ -159,6 +173,7 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
               [accountId]: {
                 ...coreNext.channels?.fortivoice?.accounts?.[accountId],
                 enabled: true,
+                ...(phone ? { phone } : {}),
                 ...(url ? { url } : {}),
               },
             },
@@ -228,7 +243,9 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
           "<sessionId|session:ID|call:ID> (requires active session)",
         );
       }
-      const merged = [text?.trim(), mediaUrl ? `[media] ${mediaUrl}` : ""].filter(Boolean).join("\n");
+      const merged = [text?.trim(), mediaUrl ? `[media] ${mediaUrl}` : ""]
+        .filter(Boolean)
+        .join("\n");
       const queued = queueFortivoiceText({
         accountId: aid,
         sessionId,
@@ -274,7 +291,7 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
       accountId: account.accountId,
       name: account.name,
       enabled: account.enabled,
-      configured: Boolean(account.url),
+      configured: Boolean(account.url && account.phone),
       baseUrl: account.url,
       running: runtime?.running ?? false,
       connected: runtime?.connected ?? false,
@@ -302,6 +319,11 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
       if (!account.url) {
         throw new Error(
           `FortiVoice URL missing for account "${account.accountId}" (set channels.fortivoice.url or channels.fortivoice.accounts.${account.accountId}.url).`,
+        );
+      }
+      if (!account.phone) {
+        throw new Error(
+          `FortiVoice phone missing for account "${account.accountId}" (set channels.fortivoice.phone or channels.fortivoice.accounts.${account.accountId}.phone, or FORTIVOICE_PHONE for default account).`,
         );
       }
 

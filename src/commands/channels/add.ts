@@ -19,6 +19,7 @@ export type ChannelsAddOptions = {
   channel?: string;
   account?: string;
   name?: string;
+  phone?: string;
   token?: string;
   tokenFile?: string;
   botToken?: string;
@@ -197,6 +198,7 @@ export async function channelsAddCommand(
     accountId,
     input: {
       name: opts.name,
+      phone: opts.phone,
       token: opts.token,
       tokenFile: opts.tokenFile,
       botToken: opts.botToken,
@@ -240,6 +242,7 @@ export async function channelsAddCommand(
     channel,
     accountId,
     name: opts.name,
+    phone: opts.phone,
     token: opts.token,
     tokenFile: opts.tokenFile,
     botToken: opts.botToken,

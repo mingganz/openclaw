@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  createFortivoiceRequest,
   createFortivoiceResponse,
   fortivoiceError,
   fortivoiceOk,
   isFortivoiceRequestEnvelope,
+  isFortivoiceResponseEnvelope,
+  parseFortivoiceActionsFromAssistantText,
   parseFortivoiceEnvelope,
+  parseFortivoiceResponsePayload,
   parseRealtimeUpdate,
   shouldProcessRealtimeInput,
 } from "./protocol.js";
@@ -56,6 +60,40 @@ describe("fortivoice protocol", () => {
     expect(response.type).toBe("res");
     expect(response.req_id).toBe("r1");
     expect(response.payload).toEqual({ ok: true, result: { actions: [] } });
+    expect(isFortivoiceResponseEnvelope(response)).toBe(true);
+  });
+
+  it("creates outbound system.hello request with phone number", () => {
+    const request = createFortivoiceRequest({
+      reqId: "hello-1",
+      seq: 1,
+      op: "system.hello",
+      sessionId: null,
+      payload: {
+        client: {
+          name: "openclaw-fortivoice",
+          version: "1.2.3",
+          phone: "+14155550123",
+        },
+        supports: {
+          ops: ["system.ping", "session.start", "session.update", "session.end"],
+        },
+      },
+    });
+
+    expect(request).toMatchObject({
+      v: 1,
+      type: "req",
+      req_id: "hello-1",
+      session_id: null,
+      seq: 1,
+      op: "system.hello",
+      payload: {
+        client: {
+          phone: "+14155550123",
+        },
+      },
+    });
   });
 
   it("extracts realtime input and filters to user/final utterances", () => {
@@ -90,6 +128,21 @@ describe("fortivoice protocol", () => {
       throw new Error("Expected realtime update");
     }
     expect(shouldProcessRealtimeInput(partial)).toBe(false);
+
+    const toolResult = parseRealtimeUpdate({
+      realtime: {
+        turn_id: "t3",
+        input: {
+          type: "tool_result",
+          text: '{"status":"ok"}',
+        },
+      },
+    });
+    expect(toolResult).not.toBeNull();
+    if (!toolResult) {
+      throw new Error("Expected realtime update");
+    }
+    expect(shouldProcessRealtimeInput(toolResult)).toBe(true);
   });
 
   it("tracks sessions and queues outbound text", () => {
@@ -129,5 +182,56 @@ describe("fortivoice protocol", () => {
         message: "broken",
       },
     });
+  });
+
+  it("parses ok/error response payload envelopes", () => {
+    expect(parseFortivoiceResponsePayload({ ok: true, result: { accepted: true } })).toEqual({
+      ok: true,
+      result: { accepted: true },
+    });
+    expect(
+      parseFortivoiceResponsePayload({ ok: false, error: { code: "denied", message: "no" } }),
+    ).toEqual({
+      ok: false,
+      error: {
+        code: "denied",
+        message: "no",
+      },
+    });
+    expect(parseFortivoiceResponsePayload({ ok: true })).toBeNull();
+  });
+
+  it("parses structured FortiVoice actions from assistant JSON block", () => {
+    const parsed = parseFortivoiceActionsFromAssistantText(`\`\`\`json
+{"actions":[{"type":"speak","message_id":"m1","text":"Please share your details."},{"type":"collect","schema":{"fields":[{"key":"full_name","type":"string","required":true},{"key":"email","type":"string","required":true}]}},{"type":"end","reason":"collection_complete"}]}
+\`\`\``);
+
+    expect(parsed).not.toBeNull();
+    expect(parsed).toEqual([
+      {
+        type: "speak",
+        message_id: "m1",
+        text: "Please share your details.",
+        barge_in: true,
+      },
+      {
+        type: "collect",
+        schema: {
+          fields: [
+            { key: "full_name", type: "string", required: true },
+            { key: "email", type: "string", required: true },
+          ],
+        },
+      },
+      {
+        type: "end",
+        reason: "collection_complete",
+      },
+    ]);
+  });
+
+  it("returns null when assistant text does not contain valid action envelope", () => {
+    expect(parseFortivoiceActionsFromAssistantText("Sure, I can help with that.")).toBeNull();
+    expect(parseFortivoiceActionsFromAssistantText('{"actions":[{"type":"collect"}]}')).toBeNull();
   });
 });

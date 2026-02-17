@@ -13,9 +13,14 @@ const wsUrlSchema = z
     }
   }, "FortiVoice URL must use ws:// or wss://");
 
+const e164PhoneSchema = z
+  .string()
+  .regex(/^\+?[0-9]{7,15}$/, "FortiVoice phone must look like E.164 (+14155550123)");
+
 export const FortivoiceAccountConfigSchema = z.object({
   enabled: z.boolean().optional(),
   name: z.string().optional(),
+  phone: e164PhoneSchema.optional(),
   url: wsUrlSchema.optional(),
   reconnectDelayMs: z.number().int().min(250).max(60_000).optional(),
   helloWorldOnStart: z.boolean().optional(),
@@ -26,6 +31,7 @@ export const FortivoiceConfigSchema = z.object({
   enabled: z.boolean().optional(),
   defaultAccount: z.string().optional(),
   name: z.string().optional(),
+  phone: e164PhoneSchema.optional(),
   url: wsUrlSchema.optional(),
   reconnectDelayMs: z.number().int().min(250).max(60_000).optional(),
   helloWorldOnStart: z.boolean().optional(),

@@ -12,6 +12,7 @@ export type ResolvedFortivoiceAccount = {
   enabled: boolean;
   configured: boolean;
   name?: string;
+  phone?: string;
   url?: string;
   reconnectDelayMs: number;
   helloWorldOnStart: boolean;

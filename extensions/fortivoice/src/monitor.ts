@@ -7,13 +7,18 @@ import {
   type RuntimeEnv,
 } from "openclaw/plugin-sdk";
 import WebSocket from "ws";
+import type { CoreConfig, ResolvedFortivoiceAccount } from "./types.js";
 import {
+  createFortivoiceRequest,
   createFortivoiceResponse,
   createSpeakAction,
   fortivoiceError,
   fortivoiceOk,
   isFortivoiceRequestEnvelope,
+  isFortivoiceResponseEnvelope,
   parseFortivoiceEnvelope,
+  parseFortivoiceActionsFromAssistantText,
+  parseFortivoiceResponsePayload,
   parseRealtimeUpdate,
   parseSessionStartPayload,
   shouldProcessRealtimeInput,
@@ -26,12 +31,20 @@ import {
   endFortivoiceSession,
   trackFortivoiceSession,
 } from "./state.js";
-import type { CoreConfig, ResolvedFortivoiceAccount } from "./types.js";
 
 const HELLO_WORLD_TEXT = "Hello from OpenClaw FortiVoice channel.";
 const FORTIVOICE_TEXT_LIMIT = 700;
+const HANDSHAKE_TIMEOUT_MS = 10_000;
+const E164_PHONE_PATTERN = /^\+?[0-9]{7,15}$/;
+const HANDLED_OPS = ["system.ping", "session.start", "session.update", "session.end"] as const;
+const WS_LOG_MAX_LEN = 2_000;
 
 type FortivoiceRuntimeEnv = RuntimeEnv;
+type FortivoiceLogger = {
+  info: (msg: string) => void;
+  warn: (msg: string) => void;
+  error: (msg: string) => void;
+};
 
 export type FortivoiceMonitorOptions = {
   account: ResolvedFortivoiceAccount;
@@ -76,6 +89,51 @@ function ensureWsUrl(raw?: string): string {
     throw new Error("FortiVoice URL must use ws:// or wss://");
   }
   return parsed.toString();
+}
+
+function ensurePhone(raw?: string): string {
+  const phone = raw?.trim();
+  if (!phone) {
+    throw new Error("FortiVoice phone is required");
+  }
+  if (!E164_PHONE_PATTERN.test(phone)) {
+    throw new Error("FortiVoice phone must look like E.164 (+14155550123)");
+  }
+  return phone;
+}
+
+function compactLogString(raw: string): string {
+  if (raw.length <= WS_LOG_MAX_LEN) {
+    return raw;
+  }
+  return `${raw.slice(0, WS_LOG_MAX_LEN)}...(truncated)`;
+}
+
+function serializeForLog(value: unknown): string {
+  try {
+    return compactLogString(JSON.stringify(value));
+  } catch {
+    return compactLogString(String(value));
+  }
+}
+
+function logWsEnvelope(params: {
+  logger: FortivoiceLogger;
+  direction: "inbound" | "outbound";
+  envelope: {
+    type: string;
+    op: string;
+    req_id?: string;
+    session_id?: string | null;
+    seq: number;
+    payload: unknown;
+  };
+}) {
+  const reqId = params.envelope.req_id ?? "-";
+  const sessionId = params.envelope.session_id ?? "null";
+  params.logger.info(
+    `fortivoice ws ${params.direction}: type=${params.envelope.type} op=${params.envelope.op} req_id=${reqId} session_id=${sessionId} seq=${params.envelope.seq} payload=${serializeForLog(params.envelope.payload)}`,
+  );
 }
 
 function queuedMessagesToActions(params: {
@@ -203,6 +261,19 @@ async function buildAgentActions(params: {
         if (!combined) {
           return;
         }
+        const structuredActions = parseFortivoiceActionsFromAssistantText(combined);
+        if (structuredActions) {
+          actions.push(...structuredActions);
+          if (structuredActions.length > 0) {
+            core.channel.activity.record({
+              channel: "fortivoice",
+              accountId: account.accountId,
+              direction: "outbound",
+            });
+            statusSink?.({ lastOutboundAt: Date.now() });
+          }
+          return;
+        }
         const chunks = core.channel.text.chunkTextWithMode(combined, textLimit, chunkMode);
         for (const chunk of chunks.length > 0 ? chunks : [combined]) {
           const trimmed = chunk.trim();
@@ -242,26 +313,29 @@ async function handleRequest(params: {
   account: ResolvedFortivoiceAccount;
   cfg: OpenClawConfig;
   runtime: FortivoiceRuntimeEnv;
+  logger: FortivoiceLogger;
   connectionId: string;
   nextSeq: () => number;
   statusSink?: (patch: Partial<ChannelAccountSnapshot>) => void;
 }): Promise<void> {
-  const { request, ws, account, cfg, runtime, connectionId, nextSeq, statusSink } = params;
+  const { request, ws, account, cfg, runtime, logger, connectionId, nextSeq, statusSink } = params;
   const core = getFortivoiceRuntime();
 
   const reply = (payload: ReturnType<typeof fortivoiceOk> | ReturnType<typeof fortivoiceError>) => {
     if (ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    ws.send(
-      JSON.stringify(
-        createFortivoiceResponse({
-          request,
-          seq: nextSeq(),
-          payload,
-        }),
-      ),
-    );
+    const response = createFortivoiceResponse({
+      request,
+      seq: nextSeq(),
+      payload,
+    });
+    logWsEnvelope({
+      logger,
+      direction: "outbound",
+      envelope: response,
+    });
+    ws.send(JSON.stringify(response));
   };
 
   if (request.op === "system.hello") {
@@ -370,11 +444,16 @@ async function handleRequest(params: {
 export async function monitorFortivoiceProvider(options: FortivoiceMonitorOptions): Promise<void> {
   const { account, config, runtime, abortSignal, statusSink } = options;
   const core = getFortivoiceRuntime();
-  const logger = core.logging.getChildLogger({ channel: "fortivoice", accountId: account.accountId });
+  const logger = core.logging.getChildLogger({
+    channel: "fortivoice",
+    accountId: account.accountId,
+  });
   const url = ensureWsUrl(account.url);
+  const phone = ensurePhone(account.phone);
   const reconnectDelayMs = Math.max(250, account.reconnectDelayMs);
 
   const connectOnce = async (): Promise<void> => {
+    logger.info(`fortivoice connecting to ${url}`);
     const ws = new WebSocket(url);
     const connectionId = randomUUID();
     let outboundSeq = 0;
@@ -387,16 +466,54 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
     abortSignal.addEventListener("abort", onAbort, { once: true });
 
     let processing = Promise.resolve();
+    let helloReqId: string | null = null;
+    let helloAcked = false;
+    let handshakeTimer: NodeJS.Timeout | null = null;
 
     await new Promise<void>((resolve) => {
+      const clearHandshakeTimer = () => {
+        if (handshakeTimer) {
+          clearTimeout(handshakeTimer);
+          handshakeTimer = null;
+        }
+      };
+
+      const failHandshake = (message: string) => {
+        logger.error(`fortivoice handshake failed: ${message}`);
+        runtime.error?.(`fortivoice handshake failed: ${message}`);
+        statusSink?.({ lastError: message });
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close(1011, "handshake_failed");
+        }
+      };
+
       ws.on("open", () => {
-        logger.info(`fortivoice hello world: connected to ${url}`);
-        statusSink?.({
-          connected: true,
-          running: true,
-          lastConnectedAt: Date.now(),
-          lastError: null,
+        helloReqId = randomUUID();
+        const helloRequest = createFortivoiceRequest({
+          reqId: helloReqId,
+          seq: nextSeq(),
+          op: "system.hello",
+          sessionId: null,
+          payload: {
+            client: {
+              name: "openclaw-fortivoice",
+              version: core.version,
+              phone,
+            },
+            supports: {
+              ops: [...HANDLED_OPS],
+            },
+          },
         });
+        logWsEnvelope({
+          logger,
+          direction: "outbound",
+          envelope: helloRequest,
+        });
+        ws.send(JSON.stringify(helloRequest));
+        handshakeTimer = setTimeout(() => {
+          failHandshake(`system.hello timed out after ${HANDSHAKE_TIMEOUT_MS}ms`);
+        }, HANDSHAKE_TIMEOUT_MS);
       });
 
       ws.on("message", (raw) => {
@@ -405,6 +522,44 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
           .then(async () => {
             const envelope = parseFortivoiceEnvelope(message);
             if (!envelope) {
+              logger.warn(`fortivoice ws inbound non-envelope: ${compactLogString(message)}`);
+              return;
+            }
+            logWsEnvelope({
+              logger,
+              direction: "inbound",
+              envelope,
+            });
+            if (
+              !helloAcked &&
+              helloReqId &&
+              envelope.op === "system.hello" &&
+              isFortivoiceResponseEnvelope(envelope) &&
+              envelope.req_id === helloReqId
+            ) {
+              clearHandshakeTimer();
+              const payload = parseFortivoiceResponsePayload(envelope.payload);
+              if (!payload) {
+                failHandshake("system.hello response payload is invalid");
+                return;
+              }
+              if (!payload.ok) {
+                failHandshake(
+                  `system.hello rejected: ${payload.error.code}: ${payload.error.message}`,
+                );
+                return;
+              }
+              helloAcked = true;
+              logger.info(`fortivoice connected to ${url}`);
+              statusSink?.({
+                connected: true,
+                running: true,
+                lastConnectedAt: Date.now(),
+                lastError: null,
+              });
+              return;
+            }
+            if (!helloAcked) {
               return;
             }
             if (
@@ -427,6 +582,7 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
               account,
               cfg: config,
               runtime,
+              logger,
               connectionId,
               nextSeq,
               statusSink,
@@ -440,7 +596,11 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
 
       ws.on("close", (code, reason) => {
         abortSignal.removeEventListener("abort", onAbort);
+        clearHandshakeTimer();
         const reasonText = reason.length > 0 ? reason.toString("utf8") : "";
+        logger.info(
+          `fortivoice disconnected from ${url}: code=${code} reason=${reasonText || "none"}`,
+        );
         statusSink?.({
           connected: false,
           running: true,
@@ -455,6 +615,7 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
 
       ws.on("error", (err) => {
         const message = formatError(err);
+        logger.error(`fortivoice websocket error: ${message}`);
         runtime.error?.(`fortivoice websocket error: ${message}`);
         statusSink?.({ lastError: message });
       });
@@ -466,6 +627,7 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
       await connectOnce();
     } catch (err) {
       const message = formatError(err);
+      logger.error(`fortivoice connection error: ${message}`);
       runtime.error?.(`fortivoice connection error: ${message}`);
       statusSink?.({ lastError: message, connected: false });
     }
