@@ -26,7 +26,7 @@ describe("fortivoice accounts", () => {
 
   it("uses FORTIVOICE_PHONE for default account when config phone is missing", () => {
     const previousPhone = process.env.FORTIVOICE_PHONE;
-    process.env.FORTIVOICE_PHONE = "+14155550123";
+    process.env.FORTIVOICE_PHONE = "2000";
     try {
       const cfg: CoreConfig = {
         channels: {
@@ -37,7 +37,7 @@ describe("fortivoice accounts", () => {
       };
 
       const account = resolveFortivoiceAccount({ cfg, accountId: DEFAULT_ACCOUNT_ID });
-      expect(account.phone).toBe("+14155550123");
+      expect(account.phone).toBe("2000");
       expect(account.configured).toBe(true);
     } finally {
       if (previousPhone === undefined) {

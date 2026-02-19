@@ -33,10 +33,6 @@ function isWebSocketUrl(raw: string): boolean {
   }
 }
 
-function isE164ishPhone(raw: string): boolean {
-  return /^\+?[0-9]{7,15}$/.test(raw);
-}
-
 function resolveSessionTarget(params: {
   accountId: string;
   to?: string | null;
@@ -63,6 +59,14 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
   meta,
   capabilities: {
     chatTypes: ["direct"],
+  },
+  agentPrompt: {
+    messageToolHints: () => [
+      '- FortiVoice replies must use a JSON action envelope only: {"actions":[...]}.',
+      "- Supported actions: speak, collect, end.",
+      "- If the user must provide missing required info, return speak + collect in the same response (not speak-only).",
+      '- For weather with missing city, include collect schema field {"key":"city","type":"string","required":true}.',
+    ],
   },
   reload: { configPrefixes: ["channels.fortivoice"] },
   configSchema: buildChannelConfigSchema(FortivoiceConfigSchema),
@@ -120,10 +124,7 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
       }
       const phone = input.phone?.trim();
       if (!phone && !input.useEnv) {
-        return "FortiVoice requires --phone <+15551234567> (or --use-env).";
-      }
-      if (phone && !isE164ishPhone(phone)) {
-        return "FortiVoice --phone must look like E.164 (+14155550123).";
+        return "FortiVoice requires --phone <value> (or --use-env).";
       }
       return null;
     },

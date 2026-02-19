@@ -35,9 +35,17 @@ import {
 const HELLO_WORLD_TEXT = "Hello from OpenClaw FortiVoice channel.";
 const FORTIVOICE_TEXT_LIMIT = 700;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
-const E164_PHONE_PATTERN = /^\+?[0-9]{7,15}$/;
 const HANDLED_OPS = ["system.ping", "session.start", "session.update", "session.end"] as const;
 const WS_LOG_MAX_LEN = 2_000;
+const FORTIVOICE_ACTION_GUIDANCE =
+  "FortiVoice action contract (must follow):\n" +
+  'Return ONLY JSON object: {"actions":[...]} (no prose outside JSON).\n' +
+  "Supported action types: speak, collect, end.\n" +
+  "When more caller input is required, include BOTH:\n" +
+  '1) a "speak" question\n' +
+  '2) a "collect" action with schema.fields for required slots.\n' +
+  "Do not ask required follow-up questions using speak-only.\n" +
+  'For weather requests missing location, collect city with {"key":"city","type":"string","required":true}.';
 
 type FortivoiceRuntimeEnv = RuntimeEnv;
 type FortivoiceLogger = {
@@ -95,9 +103,6 @@ function ensurePhone(raw?: string): string {
   const phone = raw?.trim();
   if (!phone) {
     throw new Error("FortiVoice phone is required");
-  }
-  if (!E164_PHONE_PATTERN.test(phone)) {
-    throw new Error("FortiVoice phone must look like E.164 (+14155550123)");
   }
   return phone;
 }
@@ -159,6 +164,41 @@ function createSessionActionResult(actions: FortivoiceAction[]): Record<string, 
   };
 }
 
+function buildFortivoiceAgentInput(text: string): string {
+  return `${text}\n\n${FORTIVOICE_ACTION_GUIDANCE}`;
+}
+
+export function inferFortivoiceCollectActionFromPlainReply(params: {
+  latestUserText: string;
+  assistantText: string;
+}): Extract<FortivoiceAction, { type: "collect" }> | null {
+  const userText = params.latestUserText.trim().toLowerCase();
+  const assistantText = params.assistantText.trim();
+  if (!userText || !assistantText) {
+    return null;
+  }
+  if (!/\bweather\b/.test(userText)) {
+    return null;
+  }
+
+  const assistantLower = assistantText.toLowerCase();
+  const asksForCity =
+    /\bcity\b/.test(assistantLower) &&
+    (assistantText.includes("?") ||
+      /\b(which|what)\s+city\b/.test(assistantLower) ||
+      /\bcould you tell me\b/.test(assistantLower));
+  if (!asksForCity) {
+    return null;
+  }
+
+  return {
+    type: "collect",
+    schema: {
+      fields: [{ key: "city", type: "string", required: true }],
+    },
+  };
+}
+
 async function buildAgentActions(params: {
   request: FortivoiceRequestEnvelope;
   account: ResolvedFortivoiceAccount;
@@ -194,7 +234,7 @@ async function buildAgentActions(params: {
       sessionKey: route.sessionKey,
     }),
     envelope: core.channel.reply.resolveEnvelopeFormatOptions(cfg),
-    body: text,
+    body: buildFortivoiceAgentInput(text),
   });
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
@@ -272,6 +312,27 @@ async function buildAgentActions(params: {
             });
             statusSink?.({ lastOutboundAt: Date.now() });
           }
+          return;
+        }
+        const collectAction = inferFortivoiceCollectActionFromPlainReply({
+          latestUserText: text,
+          assistantText: combined,
+        });
+        if (collectAction) {
+          actionIndex += 1;
+          actions.push(
+            createSpeakAction({
+              text: combined,
+              messageId: `${request.req_id}-${actionIndex}`,
+            }),
+            collectAction,
+          );
+          core.channel.activity.record({
+            channel: "fortivoice",
+            accountId: account.accountId,
+            direction: "outbound",
+          });
+          statusSink?.({ lastOutboundAt: Date.now() });
           return;
         }
         const chunks = core.channel.text.chunkTextWithMode(combined, textLimit, chunkMode);

@@ -3,7 +3,6 @@ import type { FortivoiceAccountConfig, FortivoiceConfig } from "./config-schema.
 import type { CoreConfig, ResolvedFortivoiceAccount } from "./types.js";
 
 const DEFAULT_RECONNECT_DELAY_MS = 2_000;
-const E164_PHONE_PATTERN = /^\+?[0-9]{7,15}$/;
 
 function getFortivoiceConfig(cfg: CoreConfig): FortivoiceConfig | undefined {
   return cfg.channels?.fortivoice;
@@ -62,10 +61,7 @@ function normalizeUrl(raw?: string): string | undefined {
 
 function normalizePhone(raw?: string): string | undefined {
   const trimmed = raw?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  return E164_PHONE_PATTERN.test(trimmed) ? trimmed : undefined;
+  return trimmed ? trimmed : undefined;
 }
 
 export function listFortivoiceAccountIds(cfg: CoreConfig): string[] {

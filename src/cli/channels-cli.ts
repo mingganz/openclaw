@@ -159,7 +159,7 @@ export function registerChannelsCli(program: Command) {
     .option("--channel <name>", `Channel (${channelNames})`)
     .option("--account <id>", "Account id (default when omitted)")
     .option("--name <name>", "Display name for this account")
-    .option("--phone <e164>", "Phone number (FortiVoice, E.164-like)")
+    .option("--phone <value>", "Phone number / extension (FortiVoice)")
     .option("--token <token>", "Bot token (Telegram/Discord)")
     .option("--token-file <path>", "Bot token file (Telegram)")
     .option("--bot-token <token>", "Slack bot token (xoxb-...)")
