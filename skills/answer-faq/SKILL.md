@@ -1,10 +1,7 @@
 ---
 name: answer_faq
 description: >
-  Answer common receptionist-style FAQ questions using approved company
-  information only. This skill provides factual, non-sensitive answers
-  such as business hours, address, contact information, and general
-  service information.
+  Handle receptionist FAQ using the approved FAQ list only: business hours/open/close time, holiday hours, office address/location, phone support availability, after-hours voicemail, email, website, parking, language support, and company services. Use this for short factual info questions like "what are your hours?", "when are you open?", "where are you located?", or "what is your email?", and do not use it for booking, call routing, incidents, account/payment data, or human-judgment requests.
 
 when_to_use: >
   Use this skill when the caller asks a general informational question
