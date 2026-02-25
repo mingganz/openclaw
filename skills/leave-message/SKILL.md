@@ -114,6 +114,7 @@ Example send:
 
 ```bash
 cat << 'EOF' | himalaya template send
+From: FortiVoice AI assistant <yucao.ca@gmail.com>
 To: yucao@fortinet.com
 Subject: [OpenClaw Caller Message][Sales] Alex Chen
 

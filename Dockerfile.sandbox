@@ -1,6 +1,7 @@
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG HIMALAYA_VERSION=v1.2.0
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -12,6 +13,24 @@ RUN apt-get update \
     python3 \
     ripgrep \
   && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in \
+    amd64) himalaya_arch="x86_64" ;; \
+    arm64) himalaya_arch="aarch64" ;; \
+    armhf) himalaya_arch="armv7l" ;; \
+    armel) himalaya_arch="armv6l" ;; \
+    i386) himalaya_arch="i686" ;; \
+    *) echo "Unsupported architecture for Himalaya: $arch" >&2; exit 1 ;; \
+  esac; \
+  curl -fsSL \
+    "https://github.com/pimalaya/himalaya/releases/download/${HIMALAYA_VERSION}/himalaya.${himalaya_arch}-linux.tgz" \
+    -o /tmp/himalaya.tgz; \
+  tar -xzf /tmp/himalaya.tgz -C /tmp; \
+  install -m 0755 /tmp/himalaya /usr/local/bin/himalaya; \
+  rm -f /tmp/himalaya.tgz /tmp/himalaya; \
+  himalaya --version
 
 RUN useradd --create-home --shell /bin/bash sandbox
 USER sandbox
