@@ -1,5 +1,5 @@
 ---
-name: leave_department_message
+name: leave_message
 description: >
   Collect a caller message for Sales or Service, confirm details, and send it to
   the mapped department email only. Use this for "leave a message" or callback
