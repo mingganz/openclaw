@@ -63,9 +63,8 @@ export const fortivoicePlugin: ChannelPlugin<ResolvedFortivoiceAccount> = {
   agentPrompt: {
     messageToolHints: () => [
       '- FortiVoice replies must use a JSON action envelope only: {"actions":[...]}.',
-      "- Supported actions: speak, collect, end.",
-      "- If the user must provide missing required info, return speak + collect in the same response (not speak-only).",
-      '- For weather with missing city, include collect schema field {"key":"city","type":"string","required":true}.',
+      "- Supported actions: speak, end.",
+      "- If the user must provide missing required info, ask follow-up questions with speak (no collect).",
     ],
   },
   reload: { configPrefixes: ["channels.fortivoice"] },

@@ -40,12 +40,10 @@ const WS_LOG_MAX_LEN = 2_000;
 const FORTIVOICE_ACTION_GUIDANCE =
   "FortiVoice action contract (must follow):\n" +
   'Return ONLY JSON object: {"actions":[...]} (no prose outside JSON).\n' +
-  "Supported action types: speak, collect, end.\n" +
-  "When more caller input is required, include BOTH:\n" +
-  '1) a "speak" question\n' +
-  '2) a "collect" action with schema.fields for required slots.\n' +
-  "Do not ask required follow-up questions using speak-only.\n" +
-  'For weather requests missing location, collect city with {"key":"city","type":"string","required":true}.';
+  "Supported action types: speak, end.\n" +
+  "When more caller input is required, ask follow-up questions using speak-only.";
+const FORTIVOICE_ACTION_GUIDANCE_ENABLED = false;
+const FORTIVOICE_COLLECT_ENABLED = false;
 
 type FortivoiceRuntimeEnv = RuntimeEnv;
 type FortivoiceLogger = {
@@ -165,7 +163,23 @@ function createSessionActionResult(actions: FortivoiceAction[]): Record<string, 
 }
 
 function buildFortivoiceAgentInput(text: string): string {
-  return `${text}\n\n${FORTIVOICE_ACTION_GUIDANCE}`;
+  return FORTIVOICE_ACTION_GUIDANCE_ENABLED ? `${text}\n\n${FORTIVOICE_ACTION_GUIDANCE}` : text;
+}
+
+function buildSpeakFallbackForCollectAction(
+  action: Extract<FortivoiceAction, { type: "collect" }>,
+): string {
+  const keys = action.schema.fields
+    .map((field) => field.key.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+  if (keys.length === 0) {
+    return "Could you share the required details?";
+  }
+  if (keys.length === 1) {
+    return `Could you share your ${keys[0]}?`;
+  }
+  return `Could you share these details: ${keys.join(", ")}?`;
 }
 
 export function inferFortivoiceCollectActionFromPlainReply(params: {
@@ -303,8 +317,27 @@ async function buildAgentActions(params: {
         }
         const structuredActions = parseFortivoiceActionsFromAssistantText(combined);
         if (structuredActions) {
-          actions.push(...structuredActions);
-          if (structuredActions.length > 0) {
+          const outgoingStructured = FORTIVOICE_COLLECT_ENABLED
+            ? structuredActions
+            : structuredActions.filter((action) => action.type !== "collect");
+          if (outgoingStructured.length === 0) {
+            const collectAction = structuredActions.find(
+              (action): action is Extract<FortivoiceAction, { type: "collect" }> =>
+                action.type === "collect",
+            );
+            if (collectAction) {
+              actionIndex += 1;
+              outgoingStructured.push(
+                createSpeakAction({
+                  text: buildSpeakFallbackForCollectAction(collectAction),
+                  messageId: `${request.req_id}-${actionIndex}`,
+                }),
+              );
+            }
+          }
+
+          actions.push(...outgoingStructured);
+          if (outgoingStructured.length > 0) {
             core.channel.activity.record({
               channel: "fortivoice",
               accountId: account.accountId,
@@ -314,26 +347,28 @@ async function buildAgentActions(params: {
           }
           return;
         }
-        const collectAction = inferFortivoiceCollectActionFromPlainReply({
-          latestUserText: text,
-          assistantText: combined,
-        });
-        if (collectAction) {
-          actionIndex += 1;
-          actions.push(
-            createSpeakAction({
-              text: combined,
-              messageId: `${request.req_id}-${actionIndex}`,
-            }),
-            collectAction,
-          );
-          core.channel.activity.record({
-            channel: "fortivoice",
-            accountId: account.accountId,
-            direction: "outbound",
+        if (FORTIVOICE_COLLECT_ENABLED) {
+          const collectAction = inferFortivoiceCollectActionFromPlainReply({
+            latestUserText: text,
+            assistantText: combined,
           });
-          statusSink?.({ lastOutboundAt: Date.now() });
-          return;
+          if (collectAction) {
+            actionIndex += 1;
+            actions.push(
+              createSpeakAction({
+                text: combined,
+                messageId: `${request.req_id}-${actionIndex}`,
+              }),
+              collectAction,
+            );
+            core.channel.activity.record({
+              channel: "fortivoice",
+              accountId: account.accountId,
+              direction: "outbound",
+            });
+            statusSink?.({ lastOutboundAt: Date.now() });
+            return;
+          }
         }
         const chunks = core.channel.text.chunkTextWithMode(combined, textLimit, chunkMode);
         for (const chunk of chunks.length > 0 ? chunks : [combined]) {
