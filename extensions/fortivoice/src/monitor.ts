@@ -32,7 +32,7 @@ import {
   trackFortivoiceSession,
 } from "./state.js";
 
-const HELLO_WORLD_TEXT = "Hello from OpenClaw FortiVoice channel.";
+const HELLO_WORLD_TEXT = "Hello, this is FortiVoice AI assistant, how can I help you";
 const FORTIVOICE_TEXT_LIMIT = 700;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const HANDLED_OPS = ["system.ping", "session.start", "session.update", "session.end"] as const;
