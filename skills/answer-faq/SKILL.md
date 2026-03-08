@@ -2,7 +2,30 @@
 name: answer_faq
 description: >
   Handle receptionist FAQ using the approved FAQ list only: business hours/open/close time, holiday hours, office address/location, phone support availability, after-hours voicemail, email, website, parking, language support, company services, FortiVoice product line details, and current promotions. Use this for short factual info questions like "what are your hours?", "where are you located?", "what is in your FortiVoice product line?", or "do you have any promotion?", and do not use it for booking, call routing, incidents, account/payment data, or human-judgment requests.
-
+metadata:
+  {
+    "openclaw":
+      {
+        "voice":
+          {
+            "enabled": true,
+            "intentExamples":
+              [
+                "what is your office address",
+                "what are your business hours",
+                "do you offer phone support",
+                "what is included in the fortivoice product line",
+              ],
+            "requiredSlots": [],
+            "optionalSlots": [],
+            "toolRequired": false,
+            "missingSlotPrompts": {},
+            "executionMode": "deterministic",
+            "escalationPolicy": "on_low_confidence",
+            "answerMode": "knowledge",
+          },
+      },
+  }
 when_to_use: >
   Use this skill when the caller asks a general informational question
   that can be answered from a fixed FAQ list and does NOT require

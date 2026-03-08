@@ -4,7 +4,37 @@ description: >
   Collect a caller message for Sales or Service, confirm details, and send it to
   the mapped department email only. Use this for "leave a message" or callback
   requests that do not require immediate live transfer.
-metadata: { "openclaw": { "emoji": "📝" } }
+metadata:
+  {
+    "openclaw":
+      {
+        "emoji": "📝",
+        "voice":
+          {
+            "enabled": true,
+            "intentExamples":
+              [
+                "i want to leave a message for sales",
+                "can you ask service to call me back",
+                "i need sales to contact me",
+              ],
+            "requiredSlots": ["department", "caller_name", "message", "contact"],
+            "optionalSlots": ["company", "preferred_callback_time"],
+            "toolRequired": true,
+            "missingSlotPrompts":
+              {
+                "department": "Should I send this to Sales or Service?",
+                "caller_name": "What is your name?",
+                "message": "What message would you like me to pass along?",
+                "contact": "What is the best phone number or email for a callback?",
+              },
+            "waitPrompt": "One moment while I take that message.",
+            "executionMode": "agentic",
+            "escalationPolicy": "always",
+            "answerMode": "none",
+          },
+      },
+  }
 when_to_use: >
   Use this skill when a caller asks to leave a message for Sales or Service
   and provides routine business information.

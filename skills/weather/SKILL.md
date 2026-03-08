@@ -2,7 +2,32 @@
 name: weather
 description: Get current weather and forecasts (no API key required).
 homepage: https://wttr.in/:help
-metadata: { "openclaw": { "emoji": "🌤️", "requires": { "bins": ["curl"] } } }
+metadata:
+  {
+    "openclaw":
+      {
+        "emoji": "🌤️",
+        "requires": { "bins": ["curl"] },
+        "voice":
+          {
+            "enabled": true,
+            "intentExamples":
+              [
+                "what is the weather today",
+                "what is the weather in ottawa",
+                "weather for montreal",
+              ],
+            "requiredSlots": ["city"],
+            "optionalSlots": ["date"],
+            "toolRequired": true,
+            "missingSlotPrompts": { "city": "What city should I check?" },
+            "waitPrompt": "One moment while I check that.",
+            "executionMode": "deterministic",
+            "escalationPolicy": "on_low_confidence",
+            "answerMode": "none",
+          },
+      },
+  }
 ---
 
 # Weather

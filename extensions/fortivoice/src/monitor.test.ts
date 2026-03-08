@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { inferFortivoiceCollectActionFromPlainReply } from "./monitor.js";
+import {
+  buildFortivoiceAgentHandoffInput,
+  inferFortivoiceCollectActionFromPlainReply,
+} from "./monitor.js";
 
 describe("fortivoice monitor", () => {
   it("infers collect(city) when weather follow-up asks for city", () => {
@@ -32,5 +35,32 @@ describe("fortivoice monitor", () => {
     });
 
     expect(action).toBeNull();
+  });
+
+  it("includes active skill and collected slots in fallback handoff input", () => {
+    const handoff = buildFortivoiceAgentHandoffInput({
+      latestUserText: "613-555-0100",
+      activeSkill: "leave_message",
+      collectedSlots: {
+        department: "sales",
+        caller_name: "John Smith",
+        message: "Please call me back about pricing.",
+      },
+    });
+
+    expect(handoff).toContain("Active skill: leave_message");
+    expect(handoff).toContain("- department: sales");
+    expect(handoff).toContain("- caller_name: John Smith");
+    expect(handoff).toContain("Latest caller utterance:");
+    expect(handoff).toContain("613-555-0100");
+  });
+
+  it("returns latest user text unchanged when no slot context exists", () => {
+    const handoff = buildFortivoiceAgentHandoffInput({
+      latestUserText: "I need help",
+      collectedSlots: {},
+    });
+
+    expect(handoff).toBe("I need help");
   });
 });

@@ -8,6 +8,7 @@ import {
 } from "openclaw/plugin-sdk";
 import WebSocket from "ws";
 import type { CoreConfig, ResolvedFortivoiceAccount } from "./types.js";
+import { findBestFaqAnswer } from "./faq-knowledge.js";
 import {
   createFortivoiceRequest,
   createFortivoiceResponse,
@@ -26,11 +27,21 @@ import {
   type FortivoiceRequestEnvelope,
 } from "./protocol.js";
 import { getFortivoiceRuntime } from "./runtime.js";
+import { compileVoiceSkillManifest, type VoiceSkillManifest } from "./skill-metadata.js";
 import {
   consumeFortivoiceQueuedText,
   endFortivoiceSession,
   trackFortivoiceSession,
 } from "./state.js";
+import { routeVoiceTurn } from "./voice-router.js";
+import {
+  clearVoiceSessionPendingState,
+  endVoiceSession,
+  getVoiceSessionSnapshot,
+  mergeVoiceSessionSlots,
+  startVoiceTurn,
+  updateVoiceSessionState,
+} from "./voice-session-state.js";
 
 const HELLO_WORLD_TEXT = "Hello, this is FortiVoice AI assistant, how can I help you";
 const FORTIVOICE_TEXT_LIMIT = 700;
@@ -44,6 +55,9 @@ const FORTIVOICE_ACTION_GUIDANCE =
   "When more caller input is required, ask follow-up questions using speak-only.";
 const FORTIVOICE_ACTION_GUIDANCE_ENABLED = false;
 const FORTIVOICE_COLLECT_ENABLED = false;
+const FORTIVOICE_ROUTER_MODEL = process.env.FORTIVOICE_ROUTER_MODEL?.trim() || "gpt-4o-mini";
+const FORTIVOICE_ROUTER_BASE_URL = process.env.FORTIVOICE_ROUTER_BASE_URL?.trim() || undefined;
+const WEATHER_FETCH_TIMEOUT_MS = 5_000;
 
 type FortivoiceRuntimeEnv = RuntimeEnv;
 type FortivoiceLogger = {
@@ -213,16 +227,309 @@ export function inferFortivoiceCollectActionFromPlainReply(params: {
   };
 }
 
-async function buildAgentActions(params: {
+function resolveVoiceSkillAllowlist(account: ResolvedFortivoiceAccount): string[] | undefined {
+  const configList = account.config.voiceSkillAllowlist
+    ?.map((entry) => entry.trim())
+    .filter(Boolean);
+  if (configList && configList.length > 0) {
+    return configList;
+  }
+  const envList = (process.env.FORTIVOICE_VOICE_SKILLS || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return envList.length > 0 ? envList : undefined;
+}
+
+function resolveRouterModel(account: ResolvedFortivoiceAccount): string {
+  return account.config.routerModel?.trim() || FORTIVOICE_ROUTER_MODEL;
+}
+
+function resolveRouterBaseUrl(account: ResolvedFortivoiceAccount): string | undefined {
+  return account.config.routerBaseUrl?.trim() || FORTIVOICE_ROUTER_BASE_URL;
+}
+
+function resolveVoicePrompt(skill: VoiceSkillManifest, slotName: string): string {
+  return skill.missingSlotPrompts[slotName] || "Could you share the missing detail?";
+}
+
+export function buildFortivoiceAgentHandoffInput(params: {
+  latestUserText: string;
+  activeSkill?: string;
+  collectedSlots?: Record<string, string>;
+}): string {
+  const latestUserText = params.latestUserText.trim();
+  const activeSkill = params.activeSkill?.trim();
+  const slotLines = Object.entries(params.collectedSlots ?? {})
+    .map(([key, value]) => [key.trim(), String(value ?? "").trim()] as const)
+    .filter(([key, value]) => Boolean(key) && Boolean(value))
+    .map(([key, value]) => `- ${key}: ${value}`);
+
+  if (!activeSkill && slotLines.length === 0) {
+    return latestUserText;
+  }
+
+  const sections = [
+    "FortiVoice voice routing context:",
+    activeSkill ? `Active skill: ${activeSkill}` : "",
+    slotLines.length > 0 ? "Collected slots:" : "",
+    ...slotLines,
+    "",
+    "Latest caller utterance:",
+    latestUserText,
+    "",
+    "Continue using the active skill and the collected slot state. Do not ask for already collected values again unless the caller corrects them.",
+  ].filter(Boolean);
+  return sections.join("\n");
+}
+
+function buildSingleSpeakAction(params: { requestId: string; text: string }): FortivoiceAction[] {
+  const text = params.text.trim();
+  if (!text) {
+    return [];
+  }
+  return [
+    createSpeakAction({
+      text,
+      messageId: `${params.requestId}-1`,
+    }),
+  ];
+}
+
+function recordImmediateOutboundActivity(params: {
+  accountId: string;
+  statusSink?: (patch: Partial<ChannelAccountSnapshot>) => void;
+}) {
+  const core = getFortivoiceRuntime();
+  core.channel.activity.record({
+    channel: "fortivoice",
+    accountId: params.accountId,
+    direction: "outbound",
+  });
+  params.statusSink?.({ lastOutboundAt: Date.now() });
+}
+
+function findManifestSkill(
+  manifest: VoiceSkillManifest[],
+  skillName?: string,
+): VoiceSkillManifest | undefined {
+  if (!skillName) {
+    return undefined;
+  }
+  return manifest.find((entry) => entry.skillName === skillName);
+}
+
+function renderVoiceAnswer(params: {
+  skill: VoiceSkillManifest;
+  sourceText: string;
+  answerKey?: string;
+}): string | null {
+  if (params.skill.answerMode !== "knowledge") {
+    return null;
+  }
+  const faqEntries = params.skill.answerData?.faqEntries ?? [];
+  if (faqEntries.length === 0) {
+    return null;
+  }
+  const selected =
+    faqEntries.find((entry) => entry.id === params.answerKey) ??
+    findBestFaqAnswer(faqEntries, params.sourceText);
+  return selected?.answer ?? null;
+}
+
+async function fetchWeatherAnswer(city: string): Promise<string> {
+  const location = city.trim();
+  if (!location) {
+    throw new Error("city is required");
+  }
+  const encoded = encodeURIComponent(location).replace(/%20/g, "+");
+  const response = await fetch(
+    `https://wttr.in/${encoded}?format=%l:+%C,+%t,+humidity+%h,+wind+%w`,
+    {
+      headers: {
+        "User-Agent": "openclaw-fortivoice/1.0",
+      },
+      signal: AbortSignal.timeout(WEATHER_FETCH_TIMEOUT_MS),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`weather lookup failed with HTTP ${response.status}`);
+  }
+  const raw = (await response.text()).trim();
+  if (!raw) {
+    throw new Error("weather lookup returned empty response");
+  }
+  return `The current weather for ${raw.replace(/^\s+|\s+$/g, "")}.`;
+}
+
+async function buildVoiceActions(params: {
   request: FortivoiceRequestEnvelope;
   account: ResolvedFortivoiceAccount;
   sessionId: string;
   text: string;
   cfg: OpenClawConfig;
   runtime: FortivoiceRuntimeEnv;
+  logger: FortivoiceLogger;
+  voiceManifest: VoiceSkillManifest[];
   statusSink?: (patch: Partial<ChannelAccountSnapshot>) => void;
 }): Promise<FortivoiceAction[]> {
-  const { request, account, sessionId, text, cfg, runtime, statusSink } = params;
+  const { request, account, sessionId, text, cfg, runtime, logger, voiceManifest, statusSink } =
+    params;
+  const sessionState = startVoiceTurn({
+    accountId: account.accountId,
+    sessionId,
+  });
+  const decision = await routeVoiceTurn({
+    text,
+    manifest: voiceManifest,
+    sessionState,
+    model: resolveRouterModel(account),
+    baseUrl: resolveRouterBaseUrl(account),
+  });
+
+  logger.info(
+    `fortivoice router decision: session=${sessionId} skill=${decision.skill ?? "-"} decision=${decision.decision} confidence=${decision.confidence.toFixed(
+      2,
+    )} missing=${decision.missingSlots.join(",") || "-"} reason=${decision.reason ?? "-"}`,
+  );
+
+  if (decision.skill) {
+    updateVoiceSessionState(
+      { accountId: account.accountId, sessionId },
+      {
+        lastSelectedSkill: decision.skill,
+      },
+    );
+  }
+  if (Object.keys(decision.slots).length > 0) {
+    mergeVoiceSessionSlots(
+      {
+        accountId: account.accountId,
+        sessionId,
+      },
+      decision.slots,
+    );
+  }
+
+  const selectedSkill = findManifestSkill(voiceManifest, decision.skill);
+  if (decision.decision === "answer_now" && selectedSkill) {
+    const answer = renderVoiceAnswer({
+      skill: selectedSkill,
+      sourceText: text,
+      answerKey: decision.answerKey,
+    });
+    if (answer) {
+      clearVoiceSessionPendingState({
+        accountId: account.accountId,
+        sessionId,
+      });
+      recordImmediateOutboundActivity({
+        accountId: account.accountId,
+        statusSink,
+      });
+      return buildSingleSpeakAction({
+        requestId: request.req_id,
+        text: answer,
+      });
+    }
+  }
+
+  if (decision.decision === "ask_slot" && selectedSkill && decision.missingSlots.length > 0) {
+    updateVoiceSessionState(
+      { accountId: account.accountId, sessionId },
+      {
+        pendingSkill: selectedSkill.skillName,
+      },
+    );
+    recordImmediateOutboundActivity({
+      accountId: account.accountId,
+      statusSink,
+    });
+    return buildSingleSpeakAction({
+      requestId: request.req_id,
+      text: resolveVoicePrompt(selectedSkill, decision.missingSlots[0] ?? ""),
+    });
+  }
+
+  if (decision.decision === "clarify" && decision.clarificationQuestion) {
+    recordImmediateOutboundActivity({
+      accountId: account.accountId,
+      statusSink,
+    });
+    return buildSingleSpeakAction({
+      requestId: request.req_id,
+      text: decision.clarificationQuestion,
+    });
+  }
+
+  if (
+    decision.decision === "wait_and_execute" &&
+    selectedSkill?.skillName === "weather" &&
+    selectedSkill.executionMode === "deterministic"
+  ) {
+    const city = decision.slots.city?.trim();
+    if (city) {
+      try {
+        const answer = await fetchWeatherAnswer(city);
+        clearVoiceSessionPendingState({
+          accountId: account.accountId,
+          sessionId,
+        });
+        recordImmediateOutboundActivity({
+          accountId: account.accountId,
+          statusSink,
+        });
+        return buildSingleSpeakAction({
+          requestId: request.req_id,
+          text: answer,
+        });
+      } catch (error) {
+        logger.warn(`fortivoice weather fast path failed: ${formatError(error)}`);
+      }
+    }
+  }
+
+  if (selectedSkill) {
+    updateVoiceSessionState(
+      { accountId: account.accountId, sessionId },
+      {
+        pendingSkill: selectedSkill.skillName,
+      },
+    );
+  }
+
+  const handoffSnapshot = getVoiceSessionSnapshot({
+    accountId: account.accountId,
+    sessionId,
+  });
+
+  return buildAgentActions({
+    request,
+    account,
+    sessionId,
+    text,
+    agentInputText: buildFortivoiceAgentHandoffInput({
+      latestUserText: text,
+      activeSkill: handoffSnapshot.pendingSkill ?? selectedSkill?.skillName,
+      collectedSlots: handoffSnapshot.pendingSlots,
+    }),
+    cfg,
+    runtime,
+    statusSink,
+  });
+}
+
+async function buildAgentActions(params: {
+  request: FortivoiceRequestEnvelope;
+  account: ResolvedFortivoiceAccount;
+  sessionId: string;
+  text: string;
+  agentInputText?: string;
+  cfg: OpenClawConfig;
+  runtime: FortivoiceRuntimeEnv;
+  statusSink?: (patch: Partial<ChannelAccountSnapshot>) => void;
+}): Promise<FortivoiceAction[]> {
+  const { request, account, sessionId, text, agentInputText, cfg, runtime, statusSink } = params;
   const core = getFortivoiceRuntime();
 
   const route = core.channel.routing.resolveAgentRoute({
@@ -248,7 +555,7 @@ async function buildAgentActions(params: {
       sessionKey: route.sessionKey,
     }),
     envelope: core.channel.reply.resolveEnvelopeFormatOptions(cfg),
-    body: buildFortivoiceAgentInput(text),
+    body: buildFortivoiceAgentInput(agentInputText ?? text),
   });
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
@@ -410,11 +717,23 @@ async function handleRequest(params: {
   cfg: OpenClawConfig;
   runtime: FortivoiceRuntimeEnv;
   logger: FortivoiceLogger;
+  voiceManifest: VoiceSkillManifest[];
   connectionId: string;
   nextSeq: () => number;
   statusSink?: (patch: Partial<ChannelAccountSnapshot>) => void;
 }): Promise<void> {
-  const { request, ws, account, cfg, runtime, logger, connectionId, nextSeq, statusSink } = params;
+  const {
+    request,
+    ws,
+    account,
+    cfg,
+    runtime,
+    logger,
+    voiceManifest,
+    connectionId,
+    nextSeq,
+    statusSink,
+  } = params;
   const core = getFortivoiceRuntime();
 
   const reply = (payload: ReturnType<typeof fortivoiceOk> | ReturnType<typeof fortivoiceError>) => {
@@ -518,19 +837,41 @@ async function handleRequest(params: {
     });
     const update = parseRealtimeUpdate(request.payload);
     if (update && shouldProcessRealtimeInput(update)) {
-      const generated = await buildAgentActions({
+      const generated = await buildVoiceActions({
         request,
         account,
         sessionId,
         text: update.text,
         cfg,
         runtime,
+        logger,
+        voiceManifest,
         statusSink,
       });
       actions.push(...generated);
     }
 
     reply(fortivoiceOk(createSessionActionResult(actions)));
+    return;
+  }
+
+  if (request.op === "session.end") {
+    const sessionId = request.session_id;
+    if (sessionId && typeof sessionId === "string") {
+      clearVoiceSessionPendingState({
+        accountId: account.accountId,
+        sessionId,
+      });
+      endVoiceSession({
+        accountId: account.accountId,
+        sessionId,
+      });
+      endFortivoiceSession({
+        accountId: account.accountId,
+        sessionId,
+      });
+    }
+    reply(fortivoiceOk({ ended: true }));
     return;
   }
 
@@ -547,6 +888,15 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
   const url = ensureWsUrl(account.url);
   const phone = ensurePhone(account.phone);
   const reconnectDelayMs = Math.max(250, account.reconnectDelayMs);
+  const voiceManifest = compileVoiceSkillManifest({
+    cfg: config,
+    skillAllowlist: resolveVoiceSkillAllowlist(account),
+    onSkip: (message) => logger.warn(message),
+  });
+
+  logger.info(
+    `fortivoice voice manifest ready: ${voiceManifest.map((entry) => entry.skillName).join(", ") || "(none)"}`,
+  );
 
   const connectOnce = async (): Promise<void> => {
     logger.info(`fortivoice connecting to ${url}`);
@@ -667,6 +1017,10 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
                 accountId: account.accountId,
                 sessionId: envelope.session_id,
               });
+              endVoiceSession({
+                accountId: account.accountId,
+                sessionId: envelope.session_id,
+              });
               return;
             }
             if (!isFortivoiceRequestEnvelope(envelope)) {
@@ -679,6 +1033,7 @@ export async function monitorFortivoiceProvider(options: FortivoiceMonitorOption
               cfg: config,
               runtime,
               logger,
+              voiceManifest,
               connectionId,
               nextSeq,
               statusSink,

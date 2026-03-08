@@ -22,6 +22,9 @@ export const FortivoiceAccountConfigSchema = z.object({
   url: wsUrlSchema.optional(),
   reconnectDelayMs: z.number().int().min(250).max(60_000).optional(),
   helloWorldOnStart: z.boolean().optional(),
+  routerModel: z.string().min(1).optional(),
+  routerBaseUrl: z.string().url().optional(),
+  voiceSkillAllowlist: z.array(z.string().min(1)).optional(),
   markdown: MarkdownConfigSchema,
 });
 
@@ -33,6 +36,9 @@ export const FortivoiceConfigSchema = z.object({
   url: wsUrlSchema.optional(),
   reconnectDelayMs: z.number().int().min(250).max(60_000).optional(),
   helloWorldOnStart: z.boolean().optional(),
+  routerModel: z.string().min(1).optional(),
+  routerBaseUrl: z.string().url().optional(),
+  voiceSkillAllowlist: z.array(z.string().min(1)).optional(),
   markdown: MarkdownConfigSchema,
   accounts: z.record(z.string(), FortivoiceAccountConfigSchema).optional(),
 });
